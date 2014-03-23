@@ -76,7 +76,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="udpscanner.cpp" />
+    <ClCompile Include="udpscanner.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="udpscanner.h" />
