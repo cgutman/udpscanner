@@ -2,11 +2,24 @@
 
 #define DEFAULT_KNOWN_CLOSED_PORT 1
 #define DEFAULT_RECV_DELAY 500
-#define DEFAULT_RATE_LIMIT_DELAY 1000
 #define DEFAULT_SEND_LENGTH 1
+#define DEFAULT_DELAY_PER_PROBE 200
 
 static int verbose_enabled = 0;
 static int output_closed_ports = 0;
+
+static
+void wait_ms(int ms) {
+#ifdef WIN32
+	Sleep(ms);
+#else
+	{
+		useconds_t sleep_time = ms;
+		sleep_time *= 1000;
+		usleep(sleep_time);
+	}
+#endif
+}
 
 static
 int send_probe(struct addrinfo *addrinfo, int port, int delay_ms, const char *send_data, int send_len) {
@@ -31,6 +44,7 @@ int send_probe(struct addrinfo *addrinfo, int port, int delay_ms, const char *se
 		err = setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
 	}
 #endif
+
 	if (err == SOCKET_ERROR) {
 		fprintf(stderr, "setsockopt() failed: %d\n", LastSocketError());
 		closesocket(s);
@@ -91,9 +105,12 @@ int send_probe(struct addrinfo *addrinfo, int port, int delay_ms, const char *se
 }
 
 static
-int scan_host(struct addrinfo *addrinfo, int known_closed_port, int start_port, int end_port, int resp_delay_ms, int rate_limiting_delay_ms, int send_len) {
+int scan_host(struct addrinfo *addrinfo, int known_closed_port,
+	int start_port, int end_port, int resp_delay_ms, int probe_delay_ms, int send_len) {
+
 	void *send_buf;
 	int res;
+	int tries;
 
 	send_buf = malloc(send_len);
 	if (send_buf == NULL) {
@@ -108,10 +125,13 @@ int scan_host(struct addrinfo *addrinfo, int known_closed_port, int start_port, 
 		return -1;
 	}
 
+	tries = 0;
 	while (start_port <= end_port) {
+		wait_ms(tries * probe_delay_ms);
 		res = send_probe(addrinfo, start_port, resp_delay_ms, (const char *) send_buf, send_len);
 		if (res == SCAN_RESULT_PORT_INCONCLUSIVE) {
 			// We need to probe the known closed port
+			wait_ms(tries * probe_delay_ms);
 			res = send_probe(addrinfo, known_closed_port, resp_delay_ms, (const char *) send_buf, send_len);
 			if (res == SCAN_RESULT_PORT_OPEN) {
 				fprintf(stderr, "The known closed port is now open. The scan is now aborting.\n");
@@ -120,12 +140,14 @@ int scan_host(struct addrinfo *addrinfo, int known_closed_port, int start_port, 
 			else if (res == SCAN_RESULT_PORT_CLOSED) {
 				// The known closed port got a port unreachable message so we are getting
 				// ICMP messages. Let's try again and make sure it's closed
+				wait_ms(tries * probe_delay_ms);
 				res = send_probe(addrinfo, start_port, resp_delay_ms, (const char *) send_buf, send_len);
 
 				// If it's still inconclusive, that means we got no port unreachable message
 				// for this port after just receiving one for the known closed port
 				if (res == SCAN_RESULT_PORT_INCONCLUSIVE) {
 					// Probe the known closed port one last time before concluding the port was open
+					wait_ms(tries * probe_delay_ms);
 					res = send_probe(addrinfo, known_closed_port, resp_delay_ms, (const char *) send_buf, send_len);
 					if (res == SCAN_RESULT_PORT_OPEN) {
 						fprintf(stderr, "The known closed port is now open. The scan is now aborting.\n");
@@ -140,20 +162,14 @@ int scan_host(struct addrinfo *addrinfo, int known_closed_port, int start_port, 
 			
 			if (res == SCAN_RESULT_PORT_INCONCLUSIVE) {
 				// The known closed port is now inconclusive so we're probably hitting
-				// ICMP rate limiting. We'll wait a bit and try again.
+				// ICMP rate limiting. We'll wait a bit more next time.
+				tries++;
+
 				if (verbose_enabled) {
-					fprintf(stderr, "ICMP rate limiting is in effect. Waiting %d milliseconds...\n",
-						rate_limiting_delay_ms);
+					fprintf(stderr, "Retried %d time(s) scanning port %d. Waiting %d milliseconds between probes...\n",
+						tries, start_port, tries * probe_delay_ms);
 				}
-#ifdef WIN32
-				Sleep(rate_limiting_delay_ms);
-#else
-				{
-					useconds_t sleep_time = rate_limiting_delay_ms;
-					sleep_time *= 1000;
-					usleep(sleep_time);
-				}
-#endif
+
 				goto try_again;
 			}
 		}
@@ -172,6 +188,7 @@ int scan_host(struct addrinfo *addrinfo, int known_closed_port, int start_port, 
 		}
 
 		start_port++;
+		tries = 0;
 
 	try_again:
 		;
@@ -186,16 +203,16 @@ void usage(void) {
 	printf("\t\tShould be set to roughly the RTT to the host.\n");
 	printf("\t\tIf set too high, the FP rate will increase.\n");
 	printf("\t\tThe default value is %d milliseconds.\n", DEFAULT_RECV_DELAY);
-	printf("\t-b <ICMP rate limiting delay (ms)>\n");
-	printf("\t\tThe amount of time that the scanner will wait\n");
-	printf("\t\tfor the host to start sending ICMP packets again.\n");
-	printf("\t\tThe default value is %d milliseconds.\n", DEFAULT_RATE_LIMIT_DELAY);
 	printf("\t-l <send length>\n");
 	printf("\t\tThe length of random data that will be sent in each packet.\n");
 	printf("\t\tThe default value is %d byte(s).\n", DEFAULT_SEND_LENGTH);
 	printf("\t-k <known closed port>\n");
 	printf("\t\tA port on the host that is known to be closed.\n");
 	printf("\t\tThe default known closed port is %d.\n", DEFAULT_KNOWN_CLOSED_PORT);
+	printf("\t-p <probe delay (ms)>\n");
+	printf("\t\tThe amount of time added between probes to avoid triggering\n");
+	printf("\t\tICMP rate limiting on consecutive probes.\n");
+	printf("\t\tThe default retry delay is %d milliseconds.\n", DEFAULT_DELAY_PER_PROBE);
 	printf("\t-c\n");
 	printf("\t\tOutput closed ports in addition to open ones.\n");
 	printf("\t-v\n");
@@ -206,10 +223,10 @@ int main(int argc, char* argv[]) {
 	int start_port;
 	int end_port;
 	int resp_delay_ms;
-	int rate_limit_delay_ms;
 	int send_len;
 	int res;
 	int known_closed_port;
+	int probe_delay_ms;
 	struct addrinfo *addrinfo;
 	struct addrinfo hint;
 	int i;
@@ -255,9 +272,9 @@ int main(int argc, char* argv[]) {
 	}
 
 	resp_delay_ms = DEFAULT_RECV_DELAY;
-	rate_limit_delay_ms = DEFAULT_RATE_LIMIT_DELAY;
 	send_len = DEFAULT_SEND_LENGTH;
 	known_closed_port = DEFAULT_KNOWN_CLOSED_PORT;
+	probe_delay_ms = DEFAULT_DELAY_PER_PROBE;
 
 	i = 4;
 	while (i < argc) {
@@ -285,11 +302,6 @@ int main(int argc, char* argv[]) {
 				i += 2;
 				break;
 
-			case 'b':
-				rate_limit_delay_ms = atoi(argv[i + 1]);
-				i += 2;
-				break;
-
 			case 'l':
 				send_len = atoi(argv[i + 1]);
 				i += 2;
@@ -297,6 +309,11 @@ int main(int argc, char* argv[]) {
 
 			case 'k':
 				known_closed_port = atoi(argv[i + 1]);
+				i += 2;
+				break;
+
+			case 'p':
+				probe_delay_ms = atoi(argv[i + 1]);
 				i += 2;
 				break;
 
@@ -309,6 +326,6 @@ int main(int argc, char* argv[]) {
 	}
 
 	return scan_host(addrinfo, known_closed_port,
-		start_port, end_port, resp_delay_ms, rate_limit_delay_ms, send_len);
+		start_port, end_port, resp_delay_ms, probe_delay_ms, send_len);
 }
 
