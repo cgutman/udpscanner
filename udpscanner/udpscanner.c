@@ -221,7 +221,7 @@ int main(int argc, char* argv[]) {
 
 		res = WSAStartup(MAKEWORD(2, 0), &Data);
 		if (res == SOCKET_ERROR) {
-			fprintf(stderr, "WSAStartup() failed: %d\n", LAST_SOCKET_ERROR());
+			fprintf(stderr, "WSAStartup() failed: %d\n", LastSocketError());
 			return -1;
 		}
 	}
