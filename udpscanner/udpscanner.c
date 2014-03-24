@@ -6,6 +6,7 @@
 #define DEFAULT_SEND_LENGTH 1
 
 static int verbose_enabled = 0;
+static int output_closed_ports = 0;
 
 static
 int send_probe(struct addrinfo *addrinfo, int port, int delay_ms, const char *send_data, int send_len) {
@@ -158,7 +159,9 @@ int scan_host(struct addrinfo *addrinfo, int known_closed_port, int start_port, 
 		}
 
 		if (res == SCAN_RESULT_PORT_CLOSED) {
-			printf("Port %d - Closed\n", start_port);
+			if (output_closed_ports || verbose_enabled) {
+				printf("Port %d - Closed\n", start_port);
+			}
 		}
 		else if (res == SCAN_RESULT_PORT_OPEN) {
 			printf("Port %d - Open\n", start_port);
@@ -193,8 +196,10 @@ void usage(void) {
 	printf("\t-k <known closed port>\n");
 	printf("\t\tA port on the host that is known to be closed.\n");
 	printf("\t\tThe default known closed port is %d.\n", DEFAULT_KNOWN_CLOSED_PORT);
+	printf("\t-c\n");
+	printf("\t\tOutput closed ports in addition to open ones.\n");
 	printf("\t-v\n");
-	printf("\t\tEnable verbose output\n");
+	printf("\t\tEnable verbose output (implies -c).\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -259,6 +264,11 @@ int main(int argc, char* argv[]) {
 		switch (argv[i][1]) {
 		case 'v':
 			verbose_enabled = 1;
+			i++;
+			break;
+
+		case 'c':
+			output_closed_ports = 1;
 			i++;
 			break;
 
