@@ -15,33 +15,42 @@ int send_probe(struct sockaddr_in *addr, int delay_ms, const char *send_data, in
 
 	s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 	if (s == INVALID_SOCKET) {
-		fprintf(stderr, "socket() failed: %d\n", LAST_SOCKET_ERROR());
+		fprintf(stderr, "socket() failed: %d\n", LastSocketError());
 		return SCAN_RESULT_ERROR;
 	}
 
-	err = setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&delay_ms, sizeof(delay_ms));
+#ifdef WIN32
+		err = setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&delay_ms, sizeof(delay_ms));
+#else
+	{
+		struct timeval tv;
+		tv.tv_sec = 0;
+		tv.tv_usec = delay_ms * 1000;
+		err = setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+	}
+#endif
 	if (err == SOCKET_ERROR) {
-		fprintf(stderr, "setsockopt() failed: %d\n", LAST_SOCKET_ERROR());
+		fprintf(stderr, "setsockopt() failed: %d\n", LastSocketError());
 		closesocket(s);
 		return SCAN_RESULT_ERROR;
 	}
 
-	err = connect(s, (const sockaddr*)addr, sizeof(*addr));
+	err = connect(s, (const struct sockaddr*)addr, sizeof(*addr));
 	if (err == SOCKET_ERROR) {
-		fprintf(stderr, "bind() failed: %d\n", LAST_SOCKET_ERROR());
+		fprintf(stderr, "bind() failed: %d\n", LastSocketError());
 		closesocket(s);
 		return SCAN_RESULT_ERROR;
 	}
 
 	err = send(s, send_data, send_len, 0);
 	if (err == SOCKET_ERROR) {
-		if (LAST_SOCKET_ERROR() == WSAECONNRESET) {
+		if (ERR_IS_REJECTION(LastSocketError())) {
 			// ICMP port unreachable received so this is a confirmed no-go
 			closesocket(s);
 			return SCAN_RESULT_PORT_CLOSED;
 		}
 		else {
-			fprintf(stderr, "send() failed: %d\n", LAST_SOCKET_ERROR());
+			fprintf(stderr, "send() failed: %d\n", LastSocketError());
 			closesocket(s);
 			return SCAN_RESULT_ERROR;
 		}
@@ -49,23 +58,23 @@ int send_probe(struct sockaddr_in *addr, int delay_ms, const char *send_data, in
 
 	err = recv(s, recv_buf, sizeof(recv_buf), 0);
 	if (err == SOCKET_ERROR) {
-		if (LAST_SOCKET_ERROR() == WSAETIMEDOUT) {
+		if (ERR_IS_TIMEOUT(LastSocketError())) {
 			// Expected if no data was received in the time period
 			closesocket(s);
 			return SCAN_RESULT_PORT_INCONCLUSIVE;
 		}
-		else if (LAST_SOCKET_ERROR() == WSAEMSGSIZE) {
+		else if (ERR_IS_TRUNCATION(LastSocketError())) {
 			// Data was received so something is definitely there
 			closesocket(s);
 			return SCAN_RESULT_PORT_OPEN;
 		}
-		else if (LAST_SOCKET_ERROR() == WSAECONNRESET) {
+		else if (ERR_IS_REJECTION(LastSocketError())) {
 			// ICMP port unreachable received
 			closesocket(s);
 			return SCAN_RESULT_PORT_CLOSED;
 		}
 		else {
-			fprintf(stderr, "recv() failed: %d\n", LAST_SOCKET_ERROR());
+			fprintf(stderr, "recv() failed: %d\n", LastSocketError());
 			closesocket(s);
 			return SCAN_RESULT_ERROR;
 		}
@@ -134,9 +143,18 @@ int scan_host(struct sockaddr_in *addr, int known_closed_port, int start_port, i
 				// The known closed port is now inconclusive so we're probably hitting
 				// ICMP rate limiting. We'll wait a bit and try again.
 				if (verbose_enabled) {
-					fprintf(stderr, "ICMP rate limiting is in effect. Waiting...\n");
+					fprintf(stderr, "ICMP rate limiting is in effect. Waiting %d milliseconds...\n",
+						rate_limiting_delay_ms);
 				}
+#ifdef WIN32
 				Sleep(rate_limiting_delay_ms);
+#else
+				{
+					useconds_t sleep_time = rate_limiting_delay_ms;
+					sleep_time *= 1000;
+					usleep(sleep_time);
+				}
+#endif
 				goto try_again;
 			}
 		}
@@ -231,37 +249,45 @@ int main(int argc, char* argv[]) {
 	i = 4;
 	while (i < argc) {
 		switch (argv[i][1]) {
-		case 'r':
-			resp_delay_ms = atoi(argv[i + 1]);
-			i += 2;
-			break;
-
-		case 'b':
-			rate_limit_delay_ms = atoi(argv[i + 1]);
-			i += 2;
-			break;
-
-		case 'l':
-			send_len = atoi(argv[i + 1]);
-			i += 2;
-			break;
-
 		case 'v':
 			verbose_enabled = 1;
 			i++;
 			break;
 
-		case 'k':
-			known_closed_port = atoi(argv[i + 1]);
-			i += 2;
-			break;
-
 		default:
-			fprintf(stderr, "Invalid option: %s\n", argv[i]);
-			usage();
-			return -1;
-		}
+			if (i == argc - 1) {
+				fprintf(stderr, "Missing parameter to option: %s\n", argv[i]);
+				usage();
+				return -1;
+			}
 
+			switch (argv[i][1]) {
+			case 'r':
+				resp_delay_ms = atoi(argv[i + 1]);
+				i += 2;
+				break;
+
+			case 'b':
+				rate_limit_delay_ms = atoi(argv[i + 1]);
+				i += 2;
+				break;
+
+			case 'l':
+				send_len = atoi(argv[i + 1]);
+				i += 2;
+				break;
+
+			case 'k':
+				known_closed_port = atoi(argv[i + 1]);
+				i += 2;
+				break;
+
+			default:
+				fprintf(stderr, "Invalid option: %s\n", argv[i]);
+				usage();
+				return -1;
+			}
+		}
 	}
 
 	return scan_host((struct sockaddr_in*)addrinfo->ai_addr, known_closed_port,

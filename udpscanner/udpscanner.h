@@ -1,6 +1,8 @@
 #pragma once
 
 #ifdef WIN32
+/* Windows */
+
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 
@@ -9,8 +11,35 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
-#define LAST_SOCKET_ERROR() WSAGetLastError()
+#define LastSocketError() WSAGetLastError()
+
+#define ERR_IS_REJECTION(x) ((x) == WSAECONNRESET)
+#define ERR_IS_TIMEOUT(x) ((x) == WSAETIMEDOUT)
+#define ERR_IS_TRUNCATION(x) ((x) == WSAEMSGSIZE)
+
 #else
+/* POSIX */
+
+#include <unistd.h>
+
+#include <sys/types.h>
+#include <sys/socket.h>
+
+#include <netinet/in.h>
+
+#include <netdb.h>
+
+typedef int SOCKET;
+#define closesocket(x) close(x)
+
+#include <errno.h>
+#define SOCKET_ERROR -1
+#define INVALID_SOCKET -1
+#define LastSocketError() errno
+
+#define ERR_IS_REJECTION(x) ((x) == ECONNREFUSED)
+#define ERR_IS_TIMEOUT(x) ((x) == EWOULDBLOCK)
+#define ERR_IS_TRUNCATION(x) ((x) == EMSGSIZE)
 
 #endif
 
