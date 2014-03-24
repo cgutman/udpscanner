@@ -26,8 +26,8 @@ int send_probe(struct addrinfo *addrinfo, int port, int delay_ms, const char *se
 #else
 	{
 		struct timeval tv;
-		tv.tv_sec = 0;
-		tv.tv_usec = delay_ms * 1000;
+		tv.tv_sec = delay_ms / 1000;
+		tv.tv_usec = (delay_ms % 1000) * 1000;
 		err = setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
 	}
 #endif
