@@ -8,12 +8,13 @@
 static int verbose_enabled = 0;
 
 static
-int send_probe(struct sockaddr_in *addr, int delay_ms, const char *send_data, int send_len) {
+int send_probe(struct addrinfo *addrinfo, int port, int delay_ms, const char *send_data, int send_len) {
 	SOCKET s;
 	int err;
 	char recv_buf[1];
 
-	s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	s = socket(addrinfo->ai_family,
+		addrinfo->ai_socktype, addrinfo->ai_protocol);
 	if (s == INVALID_SOCKET) {
 		fprintf(stderr, "socket() failed: %d\n", LastSocketError());
 		return SCAN_RESULT_ERROR;
@@ -35,9 +36,11 @@ int send_probe(struct sockaddr_in *addr, int delay_ms, const char *send_data, in
 		return SCAN_RESULT_ERROR;
 	}
 
-	err = connect(s, (const struct sockaddr*)addr, sizeof(*addr));
+	((struct sockaddr_in *)addrinfo->ai_addr)->sin_port = htons(port);
+
+	err = connect(s, addrinfo->ai_addr, addrinfo->ai_addrlen);
 	if (err == SOCKET_ERROR) {
-		fprintf(stderr, "bind() failed: %d\n", LastSocketError());
+		fprintf(stderr, "connect() failed: %d\n", LastSocketError());
 		closesocket(s);
 		return SCAN_RESULT_ERROR;
 	}
@@ -87,7 +90,7 @@ int send_probe(struct sockaddr_in *addr, int delay_ms, const char *send_data, in
 }
 
 static
-int scan_host(struct sockaddr_in *addr, int known_closed_port, int start_port, int end_port, int resp_delay_ms, int rate_limiting_delay_ms, int send_len) {
+int scan_host(struct addrinfo *addrinfo, int known_closed_port, int start_port, int end_port, int resp_delay_ms, int rate_limiting_delay_ms, int send_len) {
 	void *send_buf;
 	int res;
 
@@ -98,20 +101,17 @@ int scan_host(struct sockaddr_in *addr, int known_closed_port, int start_port, i
 
 	// Probe the known closed port first to make sure we're getting
 	// ICMP port unreachable messages on it
-	addr->sin_port = htons(known_closed_port);
-	res = send_probe(addr, resp_delay_ms, (const char *) send_buf, send_len);
+	res = send_probe(addrinfo, known_closed_port, resp_delay_ms, (const char *) send_buf, send_len);
 	if (res != SCAN_RESULT_PORT_CLOSED) {
 		fprintf(stderr, "No ICMP port unreachable message received for the known closed port. The scan cannot proceed.\n");
 		return -1;
 	}
 
 	while (start_port <= end_port) {
-		addr->sin_port = htons(start_port);
-		res = send_probe(addr, resp_delay_ms, (const char *) send_buf, send_len);
+		res = send_probe(addrinfo, start_port, resp_delay_ms, (const char *) send_buf, send_len);
 		if (res == SCAN_RESULT_PORT_INCONCLUSIVE) {
 			// We need to probe the known closed port
-			addr->sin_port = htons(known_closed_port);
-			res = send_probe(addr, resp_delay_ms, (const char *) send_buf, send_len);
+			res = send_probe(addrinfo, known_closed_port, resp_delay_ms, (const char *) send_buf, send_len);
 			if (res == SCAN_RESULT_PORT_OPEN) {
 				fprintf(stderr, "The known closed port is now open. The scan is now aborting.\n");
 				return -1;
@@ -119,15 +119,13 @@ int scan_host(struct sockaddr_in *addr, int known_closed_port, int start_port, i
 			else if (res == SCAN_RESULT_PORT_CLOSED) {
 				// The known closed port got a port unreachable message so we are getting
 				// ICMP messages. Let's try again and make sure it's closed
-				addr->sin_port = htons(start_port);
-				res = send_probe(addr, resp_delay_ms, (const char *) send_buf, send_len);
+				res = send_probe(addrinfo, start_port, resp_delay_ms, (const char *) send_buf, send_len);
 
 				// If it's still inconclusive, that means we got no port unreachable message
 				// for this port after just receiving one for the known closed port
 				if (res == SCAN_RESULT_PORT_INCONCLUSIVE) {
 					// Probe the known closed port one last time before concluding the port was open
-					addr->sin_port = htons(known_closed_port);
-					res = send_probe(addr, resp_delay_ms, (const char *) send_buf, send_len);
+					res = send_probe(addrinfo, known_closed_port, resp_delay_ms, (const char *) send_buf, send_len);
 					if (res == SCAN_RESULT_PORT_OPEN) {
 						fprintf(stderr, "The known closed port is now open. The scan is now aborting.\n");
 						return -1;
@@ -208,6 +206,7 @@ int main(int argc, char* argv[]) {
 	int res;
 	int known_closed_port;
 	struct addrinfo *addrinfo;
+	struct addrinfo hint;
 	int i;
 
 	if (argc < 4) {
@@ -227,7 +226,16 @@ int main(int argc, char* argv[]) {
 	}
 #endif
 
-	res = getaddrinfo(argv[1], NULL, NULL, &addrinfo);
+	memset(&hint, 0, sizeof(hint));
+	hint.ai_family = AF_UNSPEC;
+	hint.ai_socktype = SOCK_DGRAM;
+	hint.ai_protocol = IPPROTO_UDP;
+	hint.ai_addrlen = 0;
+	hint.ai_canonname = NULL;
+	hint.ai_addr = NULL;
+	hint.ai_next = NULL;
+
+	res = getaddrinfo(argv[1], NULL, &hint, &addrinfo);
 	if (res != 0) {
 		fprintf(stderr, "getaddrinfo() failed: %d\n", res);
 		return -1;
@@ -290,7 +298,7 @@ int main(int argc, char* argv[]) {
 		}
 	}
 
-	return scan_host((struct sockaddr_in*)addrinfo->ai_addr, known_closed_port,
+	return scan_host(addrinfo, known_closed_port,
 		start_port, end_port, resp_delay_ms, rate_limit_delay_ms, send_len);
 }
 
